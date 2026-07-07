@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -96,6 +97,7 @@ fun SoundStageApp() {
     val maxVol by AllPlayService.maxVolume.collectAsState()
     val connected by AllPlayService.isConnected.collectAsState()
     val scanning by AllPlayService.isScanning.collectAsState()
+    val statusMsg by AllPlayService.statusMessage.collectAsState()
 
     var showSpeakerList by remember { mutableStateOf(true) }
     var showVolume by remember { mutableStateOf(false) }
@@ -129,7 +131,7 @@ fun SoundStageApp() {
                     onClick = { showSpeakerList = true; showVolume = false }
                 )
                 NavigationBarItem(
-                    icon = { Icon(Icons.Default.VolumeUp, "Volume") },
+                    icon = { Icon(Icons.AutoMirrored.Filled.VolumeUp, "Volume") },
                     label = { Text("Volume") },
                     selected = showVolume,
                     onClick = { showVolume = true; showSpeakerList = false }
@@ -155,11 +157,22 @@ fun SoundStageApp() {
                         Icon(Icons.Default.WifiOff, "Disconnected",
                             modifier = Modifier.size(64.dp), tint = Color.Gray)
                         Spacer(Modifier.height(16.dp))
-                        Text("Not connected to WiFi",
-                            color = Color.Gray, fontSize = 16.sp)
-                        Text("Make sure you're on the same network as your speaker",
+                        Text(statusMsg,
+                            color = Color.Gray, fontSize = 16.sp,
+                            textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(8.dp))
+                        Text("Make sure you're on the same WiFi network",
                             color = Color.Gray, fontSize = 14.sp,
                             textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(24.dp))
+                        Button(onClick = { sendAction(context, "RETRY") },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary
+                            )) {
+                            Icon(Icons.Default.Refresh, "", modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Retry")
+                        }
                     }
                 }
             } else if (showSpeakerList) {
@@ -337,7 +350,7 @@ fun VolumeControl(
         verticalArrangement = Arrangement.Center
     ) {
         Icon(
-            Icons.Default.VolumeUp,
+            Icons.AutoMirrored.Filled.VolumeUp,
             "Volume",
             modifier = Modifier.size(80.dp),
             tint = MaterialTheme.colorScheme.primary

@@ -1,21 +1,16 @@
 package com.monster.soundstage.service
 
-import android.Manifest
 import android.app.*
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.net.NetworkInfo
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import com.qualcomm.qce.allplay.controllersdk.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,6 +29,7 @@ class AllPlayService : Service() {
         val maxVolume = MutableStateFlow(100)
         val isConnected = MutableStateFlow(false)
         val isScanning = MutableStateFlow(false)
+        val statusMessage = MutableStateFlow("Initializing...")
     }
 
     private var playerManager: PlayerManager? = null
@@ -55,30 +51,36 @@ class AllPlayService : Service() {
 
     private val connectivityReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (isWifiConnected()) {
-                Log.i(TAG, "WiFi detected via ConnectivityManager")
-                if (!initialized) scope.launch { initializeAllPlay() }
+            val wifiOk = isWifiConnected()
+            Log.i(TAG, "Connectivity changed, WiFi=$wifiOk, initialized=$initialized")
+            if (wifiOk && !initialized) {
+                scope.launch { initializeAllPlay() }
             }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        Log.i(TAG, "=== Service onCreate ===")
+        statusMessage.value = "Starting service..."
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Initializing..."))
+        startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
 
         val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION)
         registerReceiver(connectivityReceiver, filter)
 
-        if (isWifiConnected()) {
+        val wifiOk = isWifiConnected()
+        Log.i(TAG, "WiFi connected at startup: $wifiOk")
+        if (wifiOk) {
             scope.launch { initializeAllPlay() }
         } else {
-            isConnected.value = false
+            statusMessage.value = "Not connected to WiFi"
             updateNotification("Connect to WiFi to use SoundStage")
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(TAG, "onStartCommand: action=${intent?.action}")
         if (!initialized && isWifiConnected()) {
             scope.launch { initializeAllPlay() }
         }
@@ -90,6 +92,10 @@ class AllPlayService : Service() {
         if (intent == null) return
         try {
             when (intent.action) {
+                "RETRY" -> {
+                    initialized = false
+                    scope.launch { initializeAllPlay() }
+                }
                 "PLAY" -> selectedZone.value?.play()
                 "PAUSE" -> selectedZone.value?.pause()
                 "NEXT" -> selectedZone.value?.next()
@@ -106,7 +112,7 @@ class AllPlayService : Service() {
                     }
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "Handle intent error", e)
         }
     }
@@ -116,15 +122,19 @@ class AllPlayService : Service() {
     private fun initializeAllPlay() {
         if (initialized) return
         initialized = true
-        Log.i(TAG, "=== Starting AllPlay initialization ===")
+        Log.i(TAG, "=== initializeAllPlay() ===")
 
         try {
-            Log.i(TAG, "Loading PlayerManager...")
+            Log.i(TAG, "Step 1: PlayerManager.getInstance()")
+            statusMessage.value = "Step 1/3: Loading SDK..."
             playerManager = PlayerManager.getInstance(this)
+            Log.i(TAG, "Step 1 OK")
 
+            statusMessage.value = "Step 2/3: Setting up listeners..."
             playerManager?.setControllerEventListener(object : IControllerEventListener {
                 override fun onDeviceAdded(device: Device) {
                     Log.i(TAG, "Device added: ${device.displayName}")
+                    updateSpeakerList()
                 }
                 override fun onZoneAdded(zone: Zone) {
                     Log.i(TAG, "Zone added: ${zone.displayName}")
@@ -143,21 +153,28 @@ class AllPlayService : Service() {
                 }
             })
 
-            Log.i(TAG, "Calling PlayerManager.start()...")
+            Log.i(TAG, "Step 3: PlayerManager.start()")
+            statusMessage.value = "Step 3/3: Starting AllPlay engine..."
             playerManager?.start()
-            Log.i(TAG, "PlayerManager started successfully!")
+            Log.i(TAG, "PlayerManager started OK!")
+
             isConnected.value = true
+            statusMessage.value = "Connected - scanning..."
             updateNotification("Connected")
             startScanning()
 
         } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "Native library load FAILED: ${e.message}", e)
+            Log.e(TAG, "NATIVE LIB CRASH: ${e.message}", e)
             isConnected.value = false
-            updateNotification("Library error: native lib incompatible")
-        } catch (e: Exception) {
-            Log.e(TAG, "Init error: ${e.message}", e)
+            statusMessage.value = "Native lib error: ${e.message}"
+        } catch (e: ExceptionInInitializerError) {
+            Log.e(TAG, "INIT CRASH: ${e.message}", e)
             isConnected.value = false
-            updateNotification("Error: ${e.message}")
+            statusMessage.value = "SDK crash: ${e.cause?.message ?: e.message}"
+        } catch (e: Throwable) {
+            Log.e(TAG, "CRASH: ${e.message}", e)
+            isConnected.value = false
+            statusMessage.value = "Error: ${e.message}"
         }
     }
 
@@ -169,7 +186,7 @@ class AllPlayService : Service() {
                 val zone = zones.first()
                 selectZone(zone)
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "updateSpeakerList error", e)
         }
     }
@@ -181,7 +198,7 @@ class AllPlayService : Service() {
                 try {
                     playerManager?.refreshPlayerList()
                     updateSpeakerList()
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     Log.e(TAG, "Scan error", e)
                 }
                 delay(5000)
@@ -205,11 +222,10 @@ class AllPlayService : Service() {
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "Service onDestroy")
         scanJob?.cancel()
-        try {
-            playerManager?.stop()
-        } catch (_: Exception) {}
-        try { unregisterReceiver(connectivityReceiver) } catch (_: Exception) {}
+        try { playerManager?.stop() } catch (_: Throwable) {}
+        try { unregisterReceiver(connectivityReceiver) } catch (_: Throwable) {}
         scope.cancel()
         super.onDestroy()
     }
@@ -236,6 +252,6 @@ class AllPlayService : Service() {
         try {
             getSystemService(NotificationManager::class.java)
                 .notify(NOTIFICATION_ID, buildNotification(text))
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 }
