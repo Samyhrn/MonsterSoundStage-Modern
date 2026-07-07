@@ -63,13 +63,17 @@ class MainActivity : ComponentActivity() {
             requestPermissions(perms.toTypedArray(), 100)
         }
 
-        val intent = Intent(this, AllPlayService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+        try {
+            val intent = Intent(this, AllPlayService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "Service start failed", e)
         }
-        bindService(intent, connection, Context.BIND_AUTO_CREATE)
 
         setContent {
             MaterialTheme(

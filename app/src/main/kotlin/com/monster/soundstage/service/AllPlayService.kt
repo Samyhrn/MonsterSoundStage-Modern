@@ -14,7 +14,6 @@ import androidx.core.app.NotificationCompat
 import com.qualcomm.qce.allplay.controllersdk.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.TimeoutCancellationException
 
 class AllPlayService : Service() {
 
@@ -40,21 +39,15 @@ class AllPlayService : Service() {
 
     private fun isWifiConnected(): Boolean {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
-        if (Build.VERSION.SDK_INT >= 23) {
-            val network = cm.activeNetwork ?: return false
-            val caps = cm.getNetworkCapabilities(network) ?: return false
-            return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-        } else {
-            val info = cm.activeNetworkInfo ?: return false
-            return info.type == ConnectivityManager.TYPE_WIFI && info.isConnected
-        }
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
 
     private val connectivityReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val wifiOk = isWifiConnected()
-            Log.i(TAG, "Connectivity changed, WiFi=$wifiOk, initialized=$initialized")
-            if (wifiOk && !initialized) {
+            if (isWifiConnected() && !initialized) {
+                Log.i(TAG, "WiFi detected, starting init")
                 scope.launch { initializeAllPlay() }
             }
         }
@@ -63,28 +56,23 @@ class AllPlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "=== Service onCreate ===")
-        statusMessage.value = "Starting service..."
+        statusMessage.value = "Starting..."
+
+        // Don't use foreground service yet - avoid Android 14 FG restrictions
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
 
-        val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION)
-        registerReceiver(connectivityReceiver, filter)
+        registerReceiver(connectivityReceiver, IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION))
 
-        val wifiOk = isWifiConnected()
-        Log.i(TAG, "WiFi connected at startup: $wifiOk")
-        if (wifiOk) {
+        if (isWifiConnected()) {
             scope.launch { initializeAllPlay() }
         } else {
-            statusMessage.value = "Not connected to WiFi"
-            updateNotification("Connect to WiFi to use SoundStage")
+            statusMessage.value = "Connect to WiFi"
+            updateNotification("Connect to WiFi")
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.i(TAG, "onStartCommand: action=${intent?.action}")
-        if (!initialized && isWifiConnected()) {
-            scope.launch { initializeAllPlay() }
-        }
         handleIntent(intent)
         return START_STICKY
     }
@@ -93,10 +81,7 @@ class AllPlayService : Service() {
         if (intent == null) return
         try {
             when (intent.action) {
-                "RETRY" -> {
-                    initialized = false
-                    scope.launch { initializeAllPlay() }
-                }
+                "RETRY" -> { initialized = false; scope.launch { initializeAllPlay() } }
                 "PLAY" -> selectedZone.value?.play()
                 "PAUSE" -> selectedZone.value?.pause()
                 "NEXT" -> selectedZone.value?.next()
@@ -108,8 +93,7 @@ class AllPlayService : Service() {
                 "SELECT_ZONE" -> {
                     val zoneId = intent.getStringExtra("zone_id")
                     if (zoneId != null) {
-                        val found = speakerList.value.find { it.id == zoneId }
-                        if (found != null) selectZone(found)
+                        speakerList.value.find { it.id == zoneId }?.let { selectZone(it) }
                     }
                 }
             }
@@ -125,15 +109,24 @@ class AllPlayService : Service() {
         initialized = true
         Log.i(TAG, "=== initializeAllPlay() ===")
 
-        val ctx = this
         try {
-            withTimeout(15000L) {
-                Log.i(TAG, "Step 1: PlayerManager.getInstance()")
-                statusMessage.value = "Step 1/3: Loading SDK..."
-                playerManager = PlayerManager.getInstance(ctx)
-                Log.i(TAG, "Step 1 OK")
+            withTimeout(10000L) {
+                Log.i(TAG, "Step 1: Loading native library...")
+                statusMessage.value = "Loading SDK..."
 
-                statusMessage.value = "Step 2/3: Setting up listeners..."
+                // Test native lib loading FIRST
+                try {
+                    // Trigger static initializer of PlayerManager to load the native lib
+                    val test = PlayerManager.getInstance(this@AllPlayService)
+                    // If we get here, lib loaded ok
+                    playerManager = test
+                    Log.i(TAG, "Native lib loaded OK")
+                } catch (e: UnsatisfiedLinkError) {
+                    statusMessage.value = "Native library incompatible"
+                    throw e
+                }
+
+                statusMessage.value = "Setting up..."
                 playerManager?.setControllerEventListener(object : IControllerEventListener {
                     override fun onDeviceAdded(device: Device) {
                         Log.i(TAG, "Device added: ${device.displayName}")
@@ -151,33 +144,30 @@ class AllPlayService : Service() {
                         if (zone.id == selectedZone.value?.id) playerState.value = state
                     }
                     override fun onPlayerVolumeStateChanged(player: Player, volume: Int) {
-                        currentVolume.value = volume
-                        maxVolume.value = player.maxVolume
+                        currentVolume.value = volume; maxVolume.value = player.maxVolume
                     }
                 })
 
-                Log.i(TAG, "Step 3: PlayerManager.start()")
-                statusMessage.value = "Step 3/3: Starting AllPlay engine..."
+                statusMessage.value = "Starting engine..."
                 playerManager?.start()
-                Log.i(TAG, "PlayerManager started OK!")
+                Log.i(TAG, "AllPlay engine started!")
             }
 
             isConnected.value = true
-            statusMessage.value = "Connected - scanning..."
+            statusMessage.value = "Connected"
             updateNotification("Connected")
             startScanning()
 
         } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "INIT TIMEOUT: AllPlay engine hung")
+            Log.e(TAG, "TIMEOUT: Engine did not respond")
             isConnected.value = false
-            statusMessage.value = "SDK timeout — incompatible with this Android version"
-            updateNotification("SDK timeout")
+            statusMessage.value = "Engine timeout - incompatible Android version"
         } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "NATIVE LIB CRASH: ${e.message}", e)
+            Log.e(TAG, "NATIVE LIB FAILED: ${e.message}")
             isConnected.value = false
-            statusMessage.value = "Native lib error: ${e.message}"
+            statusMessage.value = "Native library too old for this Android version"
         } catch (e: ExceptionInInitializerError) {
-            Log.e(TAG, "INIT CRASH: ${e.message}", e)
+            Log.e(TAG, "INIT CRASH: ${e.message}")
             isConnected.value = false
             statusMessage.value = "SDK crash: ${e.cause?.message ?: e.message}"
         } catch (e: Throwable) {
@@ -192,46 +182,36 @@ class AllPlayService : Service() {
             val zones = playerManager?.availableZones ?: emptyList()
             speakerList.value = zones
             if (zones.isNotEmpty() && selectedZone.value == null) {
-                val zone = zones.first()
-                selectZone(zone)
+                selectZone(zones.first())
             }
-        } catch (e: Throwable) {
-            Log.e(TAG, "updateSpeakerList error", e)
-        }
+        } catch (_: Throwable) {}
     }
 
     private fun startScanning() {
         scanJob = scope.launch {
             isScanning.value = true
             while (isActive) {
-                try {
-                    playerManager?.refreshPlayerList()
-                    updateSpeakerList()
-                } catch (e: Throwable) {
-                    Log.e(TAG, "Scan error", e)
-                }
+                try { playerManager?.refreshPlayerList(); updateSpeakerList() } catch (_: Throwable) {}
                 delay(5000)
             }
         }
     }
 
-    fun selectZone(zone: Zone) {
+    private fun selectZone(zone: Zone) {
         selectedZone.value = zone
         currentVolume.value = zone.volume
         maxVolume.value = zone.maxVolume
         playerState.value = zone.playerState
     }
 
-    fun setVolume(volume: Int) {
+    private fun setVolume(volume: Int) {
         selectedZone.value?.let { zone ->
             val clamped = volume.coerceIn(0, zone.maxVolume)
-            zone.setVolume(clamped)
-            currentVolume.value = clamped
+            zone.setVolume(clamped); currentVolume.value = clamped
         }
     }
 
     override fun onDestroy() {
-        Log.i(TAG, "Service onDestroy")
         scanJob?.cancel()
         try { playerManager?.stop() } catch (_: Throwable) {}
         try { unregisterReceiver(connectivityReceiver) } catch (_: Throwable) {}
@@ -258,9 +238,6 @@ class AllPlayService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        try {
-            getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, buildNotification(text))
-        } catch (_: Throwable) {}
+        try { getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text)) } catch (_: Throwable) {}
     }
 }
