@@ -10,6 +10,7 @@ public class Device implements Comparable<Device> {
 
     private String mID;
     private long mHandle = 0;
+    private IOnboardee mOnboardee = null;
 
     private native synchronized void destroy();
     private native String getDisplayNameNative();
@@ -37,14 +38,17 @@ public class Device implements Comparable<Device> {
 
     public String getID() { return mID; }
     public String getDisplayName() { return getDisplayNameNative(); }
+    void setID(String id) { mID = id; }
+    IOnboardee getOnboardee() { return mOnboardee; }
+    void setOnboardee(IOnboardee o) { mOnboardee = o; }
+    boolean hasValidConnection() { return mOnboardee != null && mOnboardee.isConnected(); }
+
     public List<ScanInfo> getScanInfoList() {
         List<ScanInfo> list = new ArrayList<>();
         ScanInfo[] arr = getScanInfoArray();
         if (arr != null) for (ScanInfo s : arr) list.add(s);
         return list;
     }
-
-    void setID(String id) { mID = id; }
 
     public boolean equals(Object other) {
         if (!(other instanceof Device)) return false;
@@ -60,6 +64,10 @@ public class Device implements Comparable<Device> {
     }
 
     Device(String id) { mID = id; }
+    Device(IOnboardee onboardee) {
+        mOnboardee = onboardee;
+        mID = onboardee.getScanInfo() != null ? onboardee.getScanInfo().SSID : null;
+    }
 
     protected void finalize() throws Throwable {
         try { destroy(); } finally { super.finalize(); }

@@ -1,7 +1,12 @@
 package com.qualcomm.qce.allplay.controllersdk;
 
+import android.content.Context;
+import android.net.wifi.WifiManager;
 import android.util.Log;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 
 public class PlayerManager {
     private static final String TAG = "PlayerManager";
@@ -27,23 +32,32 @@ public class PlayerManager {
     native void startManager();
     native void stopManager();
 
-    private android.content.Context mContext;
-    private android.net.wifi.WifiManager mWifiManager;
-    private android.net.wifi.WifiManager.MulticastLock mMulticastLock;
-    private android.net.wifi.WifiManager.WifiLock mWifiLock;
-    private String mUniqueName;
+    private Context mContext;
+    private List<Device> mDevicesList;
+    private android.os.Handler mHandler;
+    private OnboardingManager mOnboardingManager;
+    private WifiManager mWifiManager;
     private IControllerEventListener mControllerEventListener = null;
+    private WifiManager.MulticastLock mMulticastLock = null;
+    private WifiManager.WifiLock mWifiLock = null;
+    private String mUniqueName = null;
+    private Object mPasswordObject = new Object();
     private boolean mStarted = false;
 
-    public static PlayerManager getInstance(android.content.Context context) {
+    public static PlayerManager getInstance(Context context) {
         if (sInstance == null) {
             sInstance = new PlayerManager(context);
         }
         return sInstance;
     }
 
+    public synchronized void setControllerEventListener(IControllerEventListener listener) {
+        this.mControllerEventListener = listener;
+    }
+
     public void start() {
         acquireLock();
+        mOnboardingManager.start();
         startManager();
         mStarted = true;
         Log.i(TAG, "PlayerManager started");
@@ -66,53 +80,63 @@ public class PlayerManager {
 
     public void stop() {
         releaseLock();
+        mOnboardingManager.stop();
         stopManager();
         mStarted = false;
-    }
-
-    public synchronized void setControllerEventListener(IControllerEventListener listener) {
-        this.mControllerEventListener = listener;
     }
 
     public boolean isStarted() { return mStarted; }
 
     public List<Zone> getAvailableZones() {
-        java.util.List<Zone> list = new java.util.ArrayList<>();
+        List<Zone> list = new ArrayList<>();
         Zone[] arr = getAvailableZonesArray();
         if (arr != null) for (Zone z : arr) list.add(z);
         return list;
     }
 
     public List<Player> getAllPlayers() {
-        java.util.List<Player> list = new java.util.ArrayList<>();
+        List<Player> list = new ArrayList<>();
         Player[] arr = getAllPlayersArray();
         if (arr != null) for (Player p : arr) list.add(p);
         return list;
     }
 
-    public Error createZone(Player lead, java.util.List<Player> slaves) {
+    public List<Device> getAllDevices() {
+        synchronized (mDevicesList) {
+            Collections.sort(mDevicesList);
+            return mDevicesList;
+        }
+    }
+
+    public Error createZone(Player lead, List<Player> slaves) {
         return createZoneWithLead(lead, slaves.toArray(new Player[0]));
     }
 
-    public Error createZone(java.util.List<Player> players) {
+    public Error createZone(List<Player> players) {
         return createZone(players.toArray(new Player[0]));
     }
 
-    public Error editZone(Zone zone, java.util.List<Player> players) {
+    public Error editZone(Zone zone, List<Player> players) {
         return editZone(zone, players.toArray(new Player[0]));
     }
 
-    PlayerManager(android.content.Context context) {
+    public void startOnboardingScan() { mOnboardingManager.startOnboardingScan(); }
+    public void stopOnboardingScan() { mOnboardingManager.stopOnboardingScan(); }
+
+    PlayerManager(Context context) {
         mContext = context;
-        create(getUniqueName(context));
+        create(getUniqueAppName(context));
         setKeyStorePath(context.getFileStreamPath("alljoyn_keystore").getAbsolutePath());
-        mWifiManager = (android.net.wifi.WifiManager) context.getSystemService("wifi");
+        mDevicesList = Collections.synchronizedList(new ArrayList());
+        mWifiManager = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
+        mHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        mOnboardingManager = OnboardingManager.getInstance(context, mWifiManager, this);
     }
 
-    private String getUniqueName(android.content.Context context) {
+    private String getUniqueAppName(Context context) {
         String id = android.provider.Settings.Secure.getString(
             context.getContentResolver(), "android_id");
-        if (id == null || id.isEmpty()) id = java.util.UUID.randomUUID().toString();
+        if (id == null || id.isEmpty()) id = UUID.randomUUID().toString();
         mUniqueName = context.getPackageName() + "-" + id;
         return mUniqueName;
     }

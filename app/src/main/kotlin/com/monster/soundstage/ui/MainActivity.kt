@@ -47,14 +47,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        if (Build.VERSION.SDK_INT >= 31) {
-            requestPermissions(
-                arrayOf(
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ), 100
-            )
+        // Android 12+ : location for WiFi scan
+        // Android 13+ : NEARBY_WIFI_DEVICES replaces location for WiFi
+        val perms = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 33) {
+            perms.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        } else if (Build.VERSION.SDK_INT >= 31) {
+            perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            perms.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (perms.isNotEmpty()) {
+            requestPermissions(perms.toTypedArray(), 100)
         }
 
         val intent = Intent(this, AllPlayService::class.java)

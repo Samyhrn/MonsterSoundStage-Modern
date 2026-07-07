@@ -2,9 +2,15 @@ package com.monster.soundstage.service
 
 import android.Manifest
 import android.app.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.NetworkInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -13,8 +19,6 @@ import androidx.core.content.ContextCompat
 import com.qualcomm.qce.allplay.controllersdk.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 class AllPlayService : Service() {
 
@@ -35,18 +39,47 @@ class AllPlayService : Service() {
     private var playerManager: PlayerManager? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var scanJob: Job? = null
+    private var initialized = false
+
+    private fun isWifiConnected(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+        if (Build.VERSION.SDK_INT >= 23) {
+            val network = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        } else {
+            val info = cm.activeNetworkInfo ?: return false
+            return info.type == ConnectivityManager.TYPE_WIFI && info.isConnected
+        }
+    }
+
+    private val connectivityReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (isWifiConnected()) {
+                Log.i(TAG, "WiFi detected via ConnectivityManager")
+                if (!initialized) scope.launch { initializeAllPlay() }
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Initializing..."))
+
+        val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION)
+        registerReceiver(connectivityReceiver, filter)
+
+        if (isWifiConnected()) {
+            scope.launch { initializeAllPlay() }
+        } else {
+            isConnected.value = false
+            updateNotification("Connect to WiFi to use SoundStage")
+        }
     }
 
-    private var initialized = false
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!initialized) {
-            initialized = true
+        if (!initialized && isWifiConnected()) {
             scope.launch { initializeAllPlay() }
         }
         handleIntent(intent)
@@ -55,86 +88,89 @@ class AllPlayService : Service() {
 
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
-        val zone = selectedZone.value ?: return
-        when (intent.action) {
-            "PLAY" -> zone.play()
-            "PAUSE" -> zone.pause()
-            "NEXT" -> zone.next()
-            "PREV" -> zone.previous()
-            "SET_VOLUME" -> {
-                val vol = intent.getIntExtra("volume", -1)
-                if (vol >= 0) setVolume(vol)
-            }
-            "SELECT_ZONE" -> {
-                val zoneId = intent.getStringExtra("zone_id")
-                if (zoneId != null) {
-                    val found = speakerList.value.find { it.id == zoneId }
-                    if (found != null) selectZone(found)
+        try {
+            when (intent.action) {
+                "PLAY" -> selectedZone.value?.play()
+                "PAUSE" -> selectedZone.value?.pause()
+                "NEXT" -> selectedZone.value?.next()
+                "PREV" -> selectedZone.value?.previous()
+                "SET_VOLUME" -> {
+                    val vol = intent.getIntExtra("volume", -1)
+                    if (vol >= 0) setVolume(vol)
+                }
+                "SELECT_ZONE" -> {
+                    val zoneId = intent.getStringExtra("zone_id")
+                    if (zoneId != null) {
+                        val found = speakerList.value.find { it.id == zoneId }
+                        if (found != null) selectZone(found)
+                    }
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Handle intent error", e)
         }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun initializeAllPlay() {
-        try {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED ||
-                Build.VERSION.SDK_INT < 31) {
-                // proceed
-            }
+        if (initialized) return
+        initialized = true
+        Log.i(TAG, "=== Starting AllPlay initialization ===")
 
+        try {
+            Log.i(TAG, "Loading PlayerManager...")
             playerManager = PlayerManager.getInstance(this)
+
             playerManager?.setControllerEventListener(object : IControllerEventListener {
+                override fun onDeviceAdded(device: Device) {
+                    Log.i(TAG, "Device added: ${device.displayName}")
+                }
                 override fun onZoneAdded(zone: Zone) {
                     Log.i(TAG, "Zone added: ${zone.displayName}")
                     updateSpeakerList()
                 }
-
                 override fun onZoneRemoved(zone: Zone) {
                     Log.i(TAG, "Zone removed: ${zone.displayName}")
                     updateSpeakerList()
                 }
-
                 override fun onZonePlayerStateChanged(zone: Zone, state: PlayerState) {
-                    if (zone.id == selectedZone.value?.id) {
-                        playerState.value = state
-                    }
+                    if (zone.id == selectedZone.value?.id) playerState.value = state
                 }
-
                 override fun onPlayerVolumeStateChanged(player: Player, volume: Int) {
                     currentVolume.value = volume
                     maxVolume.value = player.maxVolume
                 }
-
-                override fun onDeviceAdded(device: Device) {
-                    Log.i(TAG, "Device: ${device.displayName}")
-                }
             })
 
+            Log.i(TAG, "Calling PlayerManager.start()...")
             playerManager?.start()
+            Log.i(TAG, "PlayerManager started successfully!")
             isConnected.value = true
-
             updateNotification("Connected")
             startScanning()
 
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "Native library load FAILED: ${e.message}", e)
+            isConnected.value = false
+            updateNotification("Library error: native lib incompatible")
         } catch (e: Exception) {
-            Log.e(TAG, "Init error", e)
+            Log.e(TAG, "Init error: ${e.message}", e)
             isConnected.value = false
             updateNotification("Error: ${e.message}")
         }
     }
 
     private fun updateSpeakerList() {
-        val zones = playerManager?.availableZones ?: emptyList()
-        speakerList.value = zones
-        if (zones.isNotEmpty() && selectedZone.value == null) {
-            selectedZone.value = zones.first()
-            val zone = zones.first()
-            currentVolume.value = zone.volume
-            maxVolume.value = zone.maxVolume
-            playerState.value = zone.playerState
+        try {
+            val zones = playerManager?.availableZones ?: emptyList()
+            speakerList.value = zones
+            if (zones.isNotEmpty() && selectedZone.value == null) {
+                val zone = zones.first()
+                selectZone(zone)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "updateSpeakerList error", e)
         }
     }
 
@@ -142,8 +178,12 @@ class AllPlayService : Service() {
         scanJob = scope.launch {
             isScanning.value = true
             while (isActive) {
-                playerManager?.refreshPlayerList()
-                updateSpeakerList()
+                try {
+                    playerManager?.refreshPlayerList()
+                    updateSpeakerList()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Scan error", e)
+                }
                 delay(5000)
             }
         }
@@ -156,12 +196,6 @@ class AllPlayService : Service() {
         playerState.value = zone.playerState
     }
 
-    fun play() { selectedZone.value?.play() }
-    fun pause() { selectedZone.value?.pause() }
-    fun stop() { selectedZone.value?.stop() }
-    fun next() { selectedZone.value?.next() }
-    fun previous() { selectedZone.value?.previous() }
-
     fun setVolume(volume: Int) {
         selectedZone.value?.let { zone ->
             val clamped = volume.coerceIn(0, zone.maxVolume)
@@ -172,19 +206,19 @@ class AllPlayService : Service() {
 
     override fun onDestroy() {
         scanJob?.cancel()
-        playerManager?.stop()
+        try {
+            playerManager?.stop()
+        } catch (_: Exception) {}
+        try { unregisterReceiver(connectivityReceiver) } catch (_: Exception) {}
         scope.cancel()
         super.onDestroy()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID, "SoundStage Service",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            val channel = NotificationChannel(CHANNEL_ID, "SoundStage Service",
+                NotificationManager.IMPORTANCE_LOW)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
@@ -199,7 +233,9 @@ class AllPlayService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(NOTIFICATION_ID, buildNotification(text))
+        try {
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, buildNotification(text))
+        } catch (_: Exception) {}
     }
 }
