@@ -7,6 +7,9 @@ public class ScanInfo {
     public boolean isHidden;
     public boolean isWPSEnabled;
     public ScanInfo() {}
+    public ScanInfo(String ssid, AuthType auth) {
+        SSID = ssid; authType = auth;
+    }
     public ScanInfo(String ssid, AuthType auth, boolean hidden) {
         SSID = ssid; authType = auth; isHidden = hidden;
     }

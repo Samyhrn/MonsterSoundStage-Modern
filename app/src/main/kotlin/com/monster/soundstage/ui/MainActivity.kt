@@ -48,16 +48,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Android 12+ : location for WiFi scan
-        // Android 13+ : NEARBY_WIFI_DEVICES replaces location for WiFi
+        // Android 13+ : NEARBY_WIFI_DEVICES replaces location for WiFi scanning
+        // Android <13  : ACCESS_FINE_LOCATION is required for mDNS/AllJoyn discovery
+        // POST_NOTIFICATIONS is required starting Android 13 (API 33)
         val perms = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= 33) {
             perms.add(Manifest.permission.NEARBY_WIFI_DEVICES)
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
-        } else if (Build.VERSION.SDK_INT >= 31) {
+        } else {
             perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
             perms.add(Manifest.permission.ACCESS_COARSE_LOCATION)
-            perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
         if (perms.isNotEmpty()) {
             requestPermissions(perms.toTypedArray(), 100)
