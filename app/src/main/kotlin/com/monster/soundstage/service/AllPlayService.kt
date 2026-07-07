@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import com.qualcomm.qce.allplay.controllersdk.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.TimeoutCancellationException
 
 class AllPlayService : Service() {
 
@@ -119,50 +120,58 @@ class AllPlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun initializeAllPlay() {
+    private suspend fun initializeAllPlay() {
         if (initialized) return
         initialized = true
         Log.i(TAG, "=== initializeAllPlay() ===")
 
+        val ctx = this
         try {
-            Log.i(TAG, "Step 1: PlayerManager.getInstance()")
-            statusMessage.value = "Step 1/3: Loading SDK..."
-            playerManager = PlayerManager.getInstance(this)
-            Log.i(TAG, "Step 1 OK")
+            withTimeout(15000L) {
+                Log.i(TAG, "Step 1: PlayerManager.getInstance()")
+                statusMessage.value = "Step 1/3: Loading SDK..."
+                playerManager = PlayerManager.getInstance(ctx)
+                Log.i(TAG, "Step 1 OK")
 
-            statusMessage.value = "Step 2/3: Setting up listeners..."
-            playerManager?.setControllerEventListener(object : IControllerEventListener {
-                override fun onDeviceAdded(device: Device) {
-                    Log.i(TAG, "Device added: ${device.displayName}")
-                    updateSpeakerList()
-                }
-                override fun onZoneAdded(zone: Zone) {
-                    Log.i(TAG, "Zone added: ${zone.displayName}")
-                    updateSpeakerList()
-                }
-                override fun onZoneRemoved(zone: Zone) {
-                    Log.i(TAG, "Zone removed: ${zone.displayName}")
-                    updateSpeakerList()
-                }
-                override fun onZonePlayerStateChanged(zone: Zone, state: PlayerState) {
-                    if (zone.id == selectedZone.value?.id) playerState.value = state
-                }
-                override fun onPlayerVolumeStateChanged(player: Player, volume: Int) {
-                    currentVolume.value = volume
-                    maxVolume.value = player.maxVolume
-                }
-            })
+                statusMessage.value = "Step 2/3: Setting up listeners..."
+                playerManager?.setControllerEventListener(object : IControllerEventListener {
+                    override fun onDeviceAdded(device: Device) {
+                        Log.i(TAG, "Device added: ${device.displayName}")
+                        updateSpeakerList()
+                    }
+                    override fun onZoneAdded(zone: Zone) {
+                        Log.i(TAG, "Zone added: ${zone.displayName}")
+                        updateSpeakerList()
+                    }
+                    override fun onZoneRemoved(zone: Zone) {
+                        Log.i(TAG, "Zone removed: ${zone.displayName}")
+                        updateSpeakerList()
+                    }
+                    override fun onZonePlayerStateChanged(zone: Zone, state: PlayerState) {
+                        if (zone.id == selectedZone.value?.id) playerState.value = state
+                    }
+                    override fun onPlayerVolumeStateChanged(player: Player, volume: Int) {
+                        currentVolume.value = volume
+                        maxVolume.value = player.maxVolume
+                    }
+                })
 
-            Log.i(TAG, "Step 3: PlayerManager.start()")
-            statusMessage.value = "Step 3/3: Starting AllPlay engine..."
-            playerManager?.start()
-            Log.i(TAG, "PlayerManager started OK!")
+                Log.i(TAG, "Step 3: PlayerManager.start()")
+                statusMessage.value = "Step 3/3: Starting AllPlay engine..."
+                playerManager?.start()
+                Log.i(TAG, "PlayerManager started OK!")
+            }
 
             isConnected.value = true
             statusMessage.value = "Connected - scanning..."
             updateNotification("Connected")
             startScanning()
 
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "INIT TIMEOUT: AllPlay engine hung")
+            isConnected.value = false
+            statusMessage.value = "SDK timeout — incompatible with this Android version"
+            updateNotification("SDK timeout")
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "NATIVE LIB CRASH: ${e.message}", e)
             isConnected.value = false
